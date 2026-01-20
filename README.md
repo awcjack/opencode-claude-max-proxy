@@ -1,10 +1,10 @@
 # opencode-claude-max-proxy
 
-Use your **Claude Max subscription** ($200/month) with OpenCode.
+Use your **Claude Max subscription** with OpenCode.
 
 ## The Problem
 
-Anthropic doesn't allow Claude Max subscribers to use their subscription with third-party tools like OpenCode. If you want to use Claude in OpenCode, you have to pay for API access separately - even though you're already paying $200/month for "unlimited" Claude.
+Anthropic doesn't allow Claude Max subscribers to use their subscription with third-party tools like OpenCode. If you want to use Claude in OpenCode, you have to pay for API access separately - even though you're already paying for "unlimited" Claude.
 
 Your options are:
 1. Use Claude's official apps only (limited to their UI)
@@ -50,7 +50,7 @@ The Claude Agent SDK exists specifically to let Max subscribers use Claude progr
 
 ## Prerequisites
 
-1. **Claude Max subscription** ($200/month) - [Subscribe here](https://claude.ai/settings/subscription)
+1. **Claude Max subscription** - [Subscribe here](https://claude.ai/settings/subscription)
 
 2. **Claude CLI** installed and authenticated:
    ```bash
