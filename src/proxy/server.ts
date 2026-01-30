@@ -9,6 +9,24 @@ import { execSync } from "child_process"
 import { existsSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
+import { opencodeMcpServer } from "../mcpTools"
+
+const BLOCKED_BUILTIN_TOOLS = [
+  "Read", "Write", "Edit", "MultiEdit",
+  "Bash", "Glob", "Grep", "NotebookEdit",
+  "WebFetch", "WebSearch", "TodoWrite"
+]
+
+const MCP_SERVER_NAME = "opencode"
+
+const ALLOWED_MCP_TOOLS = [
+  `mcp__${MCP_SERVER_NAME}__read`,
+  `mcp__${MCP_SERVER_NAME}__write`,
+  `mcp__${MCP_SERVER_NAME}__edit`,
+  `mcp__${MCP_SERVER_NAME}__bash`,
+  `mcp__${MCP_SERVER_NAME}__glob`,
+  `mcp__${MCP_SERVER_NAME}__grep`
+]
 
 function resolveClaudeExecutable(): string {
   // 1. Try the SDK's bundled cli.js (same dir as this module's SDK)
@@ -101,10 +119,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         const response = query({
           prompt,
           options: {
-            maxTurns: 1,
+            maxTurns: 100,
             model,
             pathToClaudeCodeExecutable: claudeExecutable,
-            tools: []
+            disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
+            allowedTools: [...ALLOWED_MCP_TOOLS],
+            mcpServers: {
+              [MCP_SERVER_NAME]: opencodeMcpServer
+            }
           }
         })
 
@@ -141,12 +163,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
             const response = query({
               prompt,
               options: {
-                maxTurns: 1,
+                maxTurns: 100,
                 model,
                 pathToClaudeCodeExecutable: claudeExecutable,
                 includePartialMessages: true,
-                tools: [],
-                systemPrompt: "You are a helpful assistant. Respond directly to the user's message with text only. Do not attempt to use any tools."
+                disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
+                allowedTools: [...ALLOWED_MCP_TOOLS],
+                mcpServers: {
+                  [MCP_SERVER_NAME]: opencodeMcpServer
+                }
               }
             })
 
