@@ -59,7 +59,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
       claudeLog("proxy.anthropic.request", { model, stream, messageCount: body.messages?.length })
 
-      const prompt = body.messages
+      // Build system context from the request's system prompt
+      let systemContext = ""
+      if (body.system) {
+        if (typeof body.system === "string") {
+          systemContext = body.system
+        } else if (Array.isArray(body.system)) {
+          systemContext = body.system
+            .filter((b: any) => b.type === "text" && b.text)
+            .map((b: any) => b.text)
+            .join("\n")
+        }
+      }
+
+      // Convert messages to a text prompt
+      const conversationParts = body.messages
         ?.map((m: { role: string; content: string | Array<{ type: string; text?: string }> }) => {
           const role = m.role === "assistant" ? "Assistant" : "Human"
           let content: string
@@ -67,8 +81,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
             content = m.content
           } else if (Array.isArray(m.content)) {
             content = m.content
-              .filter((block) => block.type === "text" && block.text)
-              .map((block) => block.text)
+              .filter((block: any) => block.type === "text" && block.text)
+              .map((block: any) => block.text)
               .join("")
           } else {
             content = String(m.content)
@@ -76,6 +90,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           return `${role}: ${content}`
         })
         .join("\n\n") || ""
+
+      // Combine system context with conversation
+      const prompt = systemContext
+        ? `${systemContext}\n\n${conversationParts}`
+        : conversationParts
 
       if (!stream) {
         let fullContent = ""
