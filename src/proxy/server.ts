@@ -5,6 +5,29 @@ import type { Context } from "hono"
 import type { ProxyConfig } from "./types"
 import { DEFAULT_PROXY_CONFIG } from "./types"
 import { claudeLog } from "../logger"
+import { execSync } from "child_process"
+import { existsSync } from "fs"
+import { fileURLToPath } from "url"
+import { join, dirname } from "path"
+
+function resolveClaudeExecutable(): string {
+  // 1. Try the SDK's bundled cli.js (same dir as this module's SDK)
+  try {
+    const sdkPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
+    const sdkCliJs = join(dirname(sdkPath), "cli.js")
+    if (existsSync(sdkCliJs)) return sdkCliJs
+  } catch {}
+
+  // 2. Try the system-installed claude binary
+  try {
+    const claudePath = execSync("which claude", { encoding: "utf-8" }).trim()
+    if (claudePath && existsSync(claudePath)) return claudePath
+  } catch {}
+
+  throw new Error("Could not find Claude Code executable. Install via: npm install -g @anthropic-ai/claude-code")
+}
+
+const claudeExecutable = resolveClaudeExecutable()
 
 function mapModelToClaudeModel(model: string): "sonnet" | "opus" | "haiku" {
   if (model.includes("opus")) return "opus"
@@ -58,7 +81,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         let fullContent = ""
         const response = query({
           prompt,
-          options: { maxTurns: 1, model }
+          options: { maxTurns: 1, model, pathToClaudeCodeExecutable: claudeExecutable }
         })
 
         for await (const message of response) {
@@ -86,28 +109,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
       const readable = new ReadableStream({
         async start(controller) {
           try {
-            controller.enqueue(encoder.encode(`event: message_start\ndata: ${JSON.stringify({
-              type: "message_start",
-              message: {
-                id: `msg_${Date.now()}`,
-                type: "message",
-                role: "assistant",
-                content: [],
-                model: body.model,
-                stop_reason: null,
-                usage: { input_tokens: 0, output_tokens: 0 }
-              }
-            })}\n\n`))
-
-            controller.enqueue(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-              type: "content_block_start",
-              index: 0,
-              content_block: { type: "text", text: "" }
-            })}\n\n`))
-
             const response = query({
               prompt,
-              options: { maxTurns: 1, model }
+              options: {
+                maxTurns: 1,
+                model,
+                pathToClaudeCodeExecutable: claudeExecutable,
+                includePartialMessages: true
+              }
             })
 
             const heartbeat = setInterval(() => {
@@ -120,33 +129,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
             try {
               for await (const message of response) {
-                if (message.type === "assistant") {
-                  for (const block of message.message.content) {
-                    if (block.type === "text") {
-                      controller.enqueue(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
-                        type: "content_block_delta",
-                        index: 0,
-                        delta: { type: "text_delta", text: block.text }
-                      })}\n\n`))
-                    }
-                  }
+                if (message.type === "stream_event") {
+                  // Forward the raw Anthropic SSE event directly
+                  const event = message.event
+                  const eventType = event.type
+                  controller.enqueue(encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(event)}\n\n`))
                 }
               }
             } finally {
               clearInterval(heartbeat)
             }
 
-            controller.enqueue(encoder.encode(`event: content_block_stop\ndata: ${JSON.stringify({
-              type: "content_block_stop",
-              index: 0
-            })}\n\n`))
-
-            controller.enqueue(encoder.encode(`event: message_delta\ndata: ${JSON.stringify({
-              type: "message_delta",
-              delta: { stop_reason: "end_turn" },
-              usage: { output_tokens: 0 }
-            })}\n\n`))
-
+            // Ensure stream ends cleanly
             controller.enqueue(encoder.encode(`event: message_stop\ndata: ${JSON.stringify({
               type: "message_stop"
             })}\n\n`))
