@@ -83,9 +83,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         claudeLog("proxy.session.resume_requested", { sessionId: resumeSessionId })
       }
 
-      // Capture stderr and stdout for debugging
+      // Capture stderr for debugging
       const stderrMessages: string[] = []
-      const stdoutMessages: string[] = []
 
       const stderrHandler = (data: string) => {
         stderrMessages.push(data)
@@ -96,20 +95,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         // Log abort messages specifically
         if (data.includes("aborted")) {
           claudeLog("proxy.sdk.abort_detected", { message: data })
-        }
-      }
-
-      const stdoutHandler = (data: string) => {
-        stdoutMessages.push(data)
-        if (finalConfig.debug) {
-          console.log("[Claude SDK stdout]:", data)
-        }
-        // Enhanced file operation logging with full output
-        if (data.includes("read") || data.includes("write") || data.includes("edit") ||
-            data.includes("create") || data.includes("delete") || data.includes("file") ||
-            data.includes("/Users/") || data.includes("Documents")) {
-          console.log("[FILE OPERATION]:", data)  // Always log file ops for visibility
-          claudeLog("proxy.file_operation", { output: data })  // No truncation
         }
       }
 
@@ -151,7 +136,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               model,
               abortController,
               stderr: stderrHandler,
-              stdout: stdoutHandler,
               permissionMode: finalConfig.permissionMode,
               cwd: finalConfig.workingDirectory,
               ...(resumeSessionId && { resume: resumeSessionId })
@@ -216,6 +200,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
       let inactivityTimeoutId: Timer | null = null
       let clientDisconnected = false  // Track client-initiated disconnection
       let currentSessionId: string | undefined
+      let turnCount = 0
+      let hasResult = false
+      let hasStreamEvents = false  // Track if we receive stream events
 
       const encoder = new TextEncoder()
       const readable = new ReadableStream({
@@ -270,7 +257,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                 includePartialMessages: true,  // Enable real-time streaming events
                 abortController,  // For cancellation control
                 stderr: stderrHandler,
-                stdout: stdoutHandler,
                 permissionMode: finalConfig.permissionMode,
                 cwd: finalConfig.workingDirectory,
                 ...(resumeSessionId && { resume: resumeSessionId })
@@ -290,10 +276,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                 clearInterval(heartbeat)
               }
             }, 15_000)
-
-            let turnCount = 0
-            let hasResult = false
-            let hasStreamEvents = false  // Track if we receive stream events
 
             try {
               for await (const message of response) {
@@ -401,6 +383,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
                   for (let i = 0; i < textBlocks.length; i++) {
                     const block = textBlocks[i]
+                    if (!block || block.type !== "text") continue
 
                     // Send content_block_start
                     controller.enqueue(encoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
@@ -413,7 +396,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                     controller.enqueue(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
                       type: "content_block_delta",
                       index: i,
-                      delta: { type: "text_delta", text: block.text }
+                      delta: { type: "text_delta", text: (block as any).text }
                     })}\n\n`))
 
                     // Send content_block_stop
@@ -526,12 +509,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               } else {
                 console.error("   (no stderr output)")
               }
-              console.error("\nStdout output:")
-              if (stdoutMessages.length > 0) {
-                stdoutMessages.forEach(msg => console.error("  ", msg))
-              } else {
-                console.error("   (no stdout output)")
-              }
               console.error("\nPossible causes:")
               console.error("  1. SDK process received a signal (SIGTERM, SIGINT)")
               console.error("  2. Resource constraints (memory, CPU)")
@@ -551,7 +528,6 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               claudeLog("proxy.sdk.abort", {
                 error: errorMessage,
                 stderr: stderrMessages,
-                stdout: stdoutMessages,
                 turnCount,
                 hasResult
               })
