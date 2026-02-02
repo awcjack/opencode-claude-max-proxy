@@ -49,6 +49,10 @@ The Claude Agent SDK exists specifically to let Max subscribers use Claude progr
 | **Zero API costs** | Uses your Claude Max subscription, not per-token billing |
 | **Full compatibility** | Works with any Anthropic model in OpenCode |
 | **Streaming support** | Real-time SSE streaming just like the real API |
+| **Session resumption** | Continue conversations across requests with context preservation |
+| **Large context support** | No turn limits - handles complex, multi-step tasks |
+| **Auto-permissions** | No file operation prompts - seamless workflow |
+| **Configurable timeouts** | 60 minute default, adjustable for massive tasks |
 | **Auto-start** | Optional launchd service for macOS |
 | **Simple setup** | Two commands to get running |
 
@@ -164,6 +168,45 @@ Now just run `oc` to start OpenCode with Claude Max.
 
 The proxy is ~200 lines of TypeScript. No magic, no hacks.
 
+## Session Resumption
+
+**New in v1.1.0**: Continue conversations across multiple requests with full context preservation.
+
+### How It Works
+
+The proxy now captures session IDs from the Claude SDK and returns them via the `X-Claude-Session-ID` response header. Include this header in subsequent requests to resume the conversation:
+
+```bash
+# First request - get session ID
+RESPONSE=$(curl -i -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"sonnet","messages":[{"role":"user","content":"My name is Alice"}]}')
+
+SESSION_ID=$(echo "$RESPONSE" | grep -i "X-Claude-Session-ID:" | cut -d: -f2 | tr -d ' \r')
+
+# Second request - resume with context
+curl -X POST http://127.0.0.1:3456/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "X-Claude-Session-ID: $SESSION_ID" \
+  -d '{"model":"sonnet","messages":[{"role":"user","content":"What is my name?"}]}'
+
+# Claude remembers: "Your name is Alice"
+```
+
+### Benefits
+
+- **Context Continuity**: Claude remembers previous interactions
+- **Multi-Step Tasks**: Build on previous work without re-explaining
+- **Natural Conversations**: Chat naturally across multiple requests
+
+### Notes
+
+- Session resumption adds ~1-1.5s latency per turn (SDK overhead)
+- Sessions are stored in `~/.claude/projects/`
+- If session ID is invalid/expired, proxy starts a new session gracefully
+
+For detailed usage examples and troubleshooting, see [SESSION_RESUMPTION.md](./SESSION_RESUMPTION.md).
+
 ## FAQ
 
 ### Why do I need `ANTHROPIC_API_KEY=dummy`?
@@ -184,17 +227,165 @@ No. The proxy runs locally on your machine. Your requests go directly to Claude 
 
 ## Troubleshooting
 
+### "Claude Code process exited with code 1"
+
+**Most common issue** - Authentication required.
+
+**Quick fix:**
+```bash
+claude login
+```
+
+Then restart the proxy. See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for detailed diagnostics.
+
+### "Claude SDK Process Abort"
+
+**Issue:** SDK exits with "Claude Code process aborted by user" but you didn't abort it.
+
+**Most common cause:** Rate limiting or usage limits on your Claude Max subscription.
+
+**Quick diagnosis:**
+```bash
+# Enable debug logging to see what's happening
+export OPENCODE_CLAUDE_PROVIDER_DEBUG=1
+bun run proxy
+```
+
+**Solutions:**
+1. **Rate limiting** - Wait 5-10 minutes and try again
+2. **Usage limits** - Check your Claude Max subscription at https://claude.ai/settings/subscription
+3. **Network issues** - Verify connectivity: `curl https://api.anthropic.com`
+4. **Resource constraints** - Monitor with Activity Monitor or htop
+
+See [SDK_ABORT_TROUBLESHOOTING.md](./SDK_ABORT_TROUBLESHOOTING.md) for comprehensive diagnosis and solutions.
+
+### "Claude says it edited files but I don't see changes"
+
+**Issue:** Claude reports editing files, but changes don't appear.
+
+**Cause:** Working directory is set incorrectly. The SDK can only access files within the configured working directory.
+
+**Solution:**
+```bash
+# Set working directory to your projects folder
+export CLAUDE_PROXY_CWD=/Users/awcjack/Documents
+bun run proxy
+
+# Verify startup shows correct directory:
+# Working Directory: /Users/awcjack/Documents
+```
+
+**New: Enhanced Debugging**
+
+The proxy now logs file operations automatically:
+```bash
+bun run proxy
+
+# Look for these in console:
+# [FILE OPERATION]: Writing to /Users/awcjack/Documents/test.txt
+# [TOOL RESULT]: { is_error: false, content_preview: '...' }
+```
+
+These logs show **exactly where** files are being written and whether operations succeeded.
+
+See:
+- [FILE_OPERATION_DEBUGGING.md](./FILE_OPERATION_DEBUGGING.md) - Debug file operation issues
+- [FILE_OPERATIONS_GUIDE.md](./FILE_OPERATIONS_GUIDE.md) - Working directory setup
+
 ### "Authentication failed"
 
-Run `claude login` to authenticate with the Claude CLI.
+Run `claude login` to authenticate with the Claude CLI:
+
+```bash
+claude login
+```
+
+Verify it works:
+```bash
+claude --version
+echo "test" | claude
+```
 
 ### "Connection refused"
 
-Make sure the proxy is running: `bun run proxy`
+Make sure the proxy is running:
+
+```bash
+bun run proxy
+```
+
+Check the port is not already in use:
+```bash
+lsof -i :3456
+```
 
 ### Proxy keeps dying
 
 Use the launchd service (see Auto-start section) which automatically restarts the proxy.
+
+Or check logs for errors:
+```bash
+# Enable debug logging
+export OPENCODE_CLAUDE_PROVIDER_DEBUG=1
+bun run proxy
+```
+
+### "I need permission to read these files"
+
+If Claude asks for permission but can't proceed:
+
+**This is now fixed!** The proxy defaults to `bypassPermissions` mode. Restart the proxy:
+
+```bash
+bun run proxy
+
+# Should show:
+# Permission Mode: bypassPermissions
+#   ⚠️  Auto-approving all file operations (no prompts)
+```
+
+To set a specific working directory:
+```bash
+export CLAUDE_PROXY_CWD=/Users/awcjack/Documents/my-project
+bun run proxy
+```
+
+See [PERMISSIONS_GUIDE.md](./PERMISSIONS_GUIDE.md) for detailed configuration.
+
+### Tasks Complete Too Early
+
+If complex tasks finish prematurely without completing the work:
+
+**This is now fixed!** The proxy no longer limits turns. To verify:
+```bash
+# Check startup message shows generous timeouts
+bun run proxy
+
+# Should display:
+# Total timeout: 60 minutes
+# Inactivity timeout: 15 minutes
+```
+
+For **very large context tasks** (full codebase analysis, extensive refactoring):
+```bash
+# Increase timeouts before starting
+export CLAUDE_PROXY_TIMEOUT_MS=7200000      # 2 hours
+export CLAUDE_PROXY_INACTIVITY_MS=1800000   # 30 minutes
+bun run proxy
+```
+
+See [LARGE_CONTEXT_SUPPORT.md](./LARGE_CONTEXT_SUPPORT.md) for details.
+
+### Streaming Issues
+
+The proxy includes enhanced streaming with timeouts and error handling. See [STREAMING_IMPROVEMENTS.md](./STREAMING_IMPROVEMENTS.md) for details.
+
+**If you experience connection resets:**
+- Timeouts are set to 60 minutes (total) and 15 minutes (inactivity) by default
+- Check stderr output in proxy console
+- Verify network stability to api.anthropic.com
+
+For comprehensive troubleshooting, see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md).
 
 ## License
 
