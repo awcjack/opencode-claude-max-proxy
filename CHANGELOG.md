@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.0](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.0.2...v1.1.0) (2026-02-01)
+
+### Features
+
+* **session-resumption**: Add conversation continuity support via X-Claude-Session-ID headers
+  - Sessions are now tracked and can be resumed across multiple requests
+  - Session IDs automatically returned in response headers
+  - Supports both streaming and non-streaming modes
+  - Graceful fallback when invalid/expired session IDs are provided
+  - Detailed logging for session creation and resumption
+  - Full documentation in [SESSION_RESUMPTION.md](./SESSION_RESUMPTION.md)
+
+### Documentation
+
+* Add comprehensive session resumption guide with examples
+* Update README.md with session resumption feature
+* Add design document for implementation
+
 ## [1.0.2](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.0.1...v1.0.2) (2026-01-26)
 
 
