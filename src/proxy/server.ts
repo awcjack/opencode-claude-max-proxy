@@ -138,21 +138,35 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               stderr: stderrHandler,
               permissionMode: finalConfig.permissionMode,
               cwd: finalConfig.workingDirectory,
+              mcpServers: {
+                "computer-control-mcp": {
+                  command: "uvx",
+                  args: ["computer-control-mcp", "server"]
+                }
+              },
               ...(resumeSessionId && { resume: resumeSessionId })
             }
           })
 
           for await (const message of response) {
-            if (message.type === "assistant") {
-              // Capture session ID from SDK response
-              if (message.session_id) {
-                currentSessionId = message.session_id
+            // Capture session ID from SystemMessage init (available early)
+            if (message.type === "system" && (message as any).subtype === "init") {
+              if ((message as any).session_id) {
+                currentSessionId = (message as any).session_id
                 if (resumeSessionId) {
                   claudeLog("proxy.session.resumed", { sessionId: currentSessionId })
                 } else {
                   claudeLog("proxy.session.new", { sessionId: currentSessionId })
                 }
               }
+            }
+            // Also capture from ResultMessage (most reliable, always present)
+            if (message.type === "result") {
+              if ((message as any).session_id) {
+                currentSessionId = (message as any).session_id
+              }
+            }
+            if (message.type === "assistant") {
               for (const block of message.message.content) {
                 if (block.type === "text") {
                   fullContent += block.text
@@ -259,6 +273,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                 stderr: stderrHandler,
                 permissionMode: finalConfig.permissionMode,
                 cwd: finalConfig.workingDirectory,
+                mcpServers: {
+                  "computer-control-mcp": {
+                    command: "uvx",
+                    args: ["computer-control-mcp", "server"]
+                  }
+                },
                 ...(resumeSessionId && { resume: resumeSessionId })
               }
             })
@@ -293,21 +313,22 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                   claudeLog("proxy.message", { type: message.type, keys: Object.keys(message) })
                 }
 
+                // Capture session ID from SystemMessage init (available early in stream)
+                if (message.type === "system" && (message as any).subtype === "init") {
+                  if ((message as any).session_id && !currentSessionId) {
+                    currentSessionId = (message as any).session_id
+                    if (resumeSessionId) {
+                      claudeLog("proxy.session.resumed", { sessionId: currentSessionId })
+                    } else {
+                      claudeLog("proxy.session.new", { sessionId: currentSessionId })
+                    }
+                  }
+                }
+
                 // Track turns and results
                 if (message.type === "assistant") {
                   turnCount++
-                  // Capture session ID from SDK response
-                  if (message.session_id) {
-                    if (!currentSessionId) {
-                      currentSessionId = message.session_id
-                      if (resumeSessionId) {
-                        claudeLog("proxy.session.resumed", { sessionId: currentSessionId })
-                      } else {
-                        claudeLog("proxy.session.new", { sessionId: currentSessionId })
-                      }
-                    }
-                  }
-                  claudeLog("proxy.turn", { turn: turnCount, session_id: message.session_id })
+                  claudeLog("proxy.turn", { turn: turnCount })
                   if (finalConfig.debug) {
                     claudeLog("proxy.assistant.content", {
                       contentBlockCount: message.message.content.length,
@@ -332,11 +353,16 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
                 if (message.type === "result") {
                   hasResult = true
+                  // Capture session ID from ResultMessage (most reliable, always present)
+                  if ((message as any).session_id) {
+                    currentSessionId = (message as any).session_id
+                  }
                   claudeLog("proxy.result", {
                     subtype: message.subtype,
                     num_turns: message.num_turns,
                     duration_ms: message.duration_ms,
-                    is_error: message.is_error
+                    is_error: message.is_error,
+                    session_id: currentSessionId
                   })
                 }
 
