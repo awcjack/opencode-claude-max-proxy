@@ -29,6 +29,7 @@
   "files": [
     "bin/",
     "src/proxy/",
+    "src/plugin/",
     "src/logger.ts",
     "README.md"
   ],

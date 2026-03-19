@@ -10,6 +10,184 @@ import { existsSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
 import { opencodeMcpServer } from "../mcpTools"
+import { createHash } from "crypto"
+
+// Session tracking for conversation continuity
+// Maps opencode session ID -> Claude Agent SDK session state
+interface SessionState {
+  claudeSessionId: string
+  lastAccess: number
+  messageCount: number
+  lastRequestId?: string
+}
+const sessionCache = new Map<string, SessionState>()
+
+// Fallback: fingerprint-based session tracking for requests without x-opencode-session header
+const fingerprintCache = new Map<string, SessionState>()
+
+// Clean up stale sessions every 30 minutes
+const SESSION_TTL_MS = 60 * 60 * 1000 // 1 hour
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, value] of sessionCache.entries()) {
+    if (now - value.lastAccess > SESSION_TTL_MS) {
+      claudeLog("proxy.session.expired", { opencodeSession: key, claudeSessionId: value.claudeSessionId })
+      sessionCache.delete(key)
+    }
+  }
+  for (const [key, value] of fingerprintCache.entries()) {
+    if (now - value.lastAccess > SESSION_TTL_MS) {
+      claudeLog("proxy.session.expired", { fingerprint: key, claudeSessionId: value.claudeSessionId })
+      fingerprintCache.delete(key)
+    }
+  }
+}, 30 * 60 * 1000)
+
+/**
+ * Look up session state by opencode session ID (primary) or fingerprint (fallback).
+ * When x-opencode-session header is present, it is the authoritative session key.
+ * Otherwise fall back to fingerprint-based matching for backwards compatibility.
+ */
+function lookupSession(
+  opencodeSessionId: string | undefined,
+  body: {
+    system?: string | Array<{ type: string; text?: string }>;
+    messages?: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
+  }
+): { state: SessionState; source: "header" | "fingerprint" } | undefined {
+  // Primary: use x-opencode-session header
+  if (opencodeSessionId) {
+    const cached = sessionCache.get(opencodeSessionId)
+    if (cached) {
+      claudeLog("proxy.session.lookup_hit", {
+        source: "header",
+        opencodeSession: opencodeSessionId,
+        claudeSessionId: cached.claudeSessionId,
+        previousMessageCount: cached.messageCount,
+        currentMessageCount: body.messages?.length || 0
+      })
+      return { state: cached, source: "header" }
+    }
+    claudeLog("proxy.session.lookup_miss", { source: "header", opencodeSession: opencodeSessionId })
+  }
+
+  // Fallback: fingerprint-based matching
+  const fingerprint = getConversationFingerprint(body)
+  if (fingerprint) {
+    const cached = fingerprintCache.get(fingerprint)
+    if (cached) {
+      claudeLog("proxy.session.lookup_hit", {
+        source: "fingerprint",
+        fingerprint,
+        claudeSessionId: cached.claudeSessionId,
+        previousMessageCount: cached.messageCount,
+        currentMessageCount: body.messages?.length || 0
+      })
+      return { state: cached, source: "fingerprint" }
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * Store the Claude Agent SDK session ID, keyed by opencode session and/or fingerprint.
+ */
+function storeSession(
+  opencodeSessionId: string | undefined,
+  body: {
+    system?: string | Array<{ type: string; text?: string }>;
+    messages?: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
+  },
+  claudeSessionId: string,
+  requestId?: string
+): void {
+  if (!claudeSessionId) return
+
+  const messageCount = body.messages?.length || 0
+  const state: SessionState = {
+    claudeSessionId,
+    lastAccess: Date.now(),
+    messageCount,
+    lastRequestId: requestId
+  }
+
+  // Store by opencode session ID (primary)
+  if (opencodeSessionId) {
+    sessionCache.set(opencodeSessionId, state)
+    claudeLog("proxy.session.stored", {
+      source: "header",
+      opencodeSession: opencodeSessionId,
+      claudeSessionId,
+      messageCount
+    })
+  }
+
+  // Also store by fingerprint (fallback for requests without header)
+  const fingerprint = getConversationFingerprint(body)
+  if (fingerprint) {
+    fingerprintCache.set(fingerprint, state)
+    claudeLog("proxy.session.stored", {
+      source: "fingerprint",
+      fingerprint,
+      claudeSessionId,
+      messageCount
+    })
+  }
+}
+
+/**
+ * Generate a fingerprint for a conversation (fallback when no x-opencode-session header).
+ */
+function getConversationFingerprint(body: {
+  system?: string | Array<{ type: string; text?: string }>;
+  messages?: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
+}): string {
+  let firstUserMessage: string | undefined
+  if (body.messages && body.messages.length > 0) {
+    for (const msg of body.messages) {
+      if (msg.role === "user") {
+        if (typeof msg.content === "string") {
+          firstUserMessage = msg.content
+        } else if (Array.isArray(msg.content)) {
+          firstUserMessage = msg.content
+            .filter((block: any) => block.type === "text" && block.text)
+            .map((block: any) => block.text)
+            .join("")
+        }
+        break
+      }
+    }
+  }
+
+  if (!firstUserMessage) return ""
+
+  const contextSnippet = firstUserMessage.slice(0, 2000)
+  return createHash("sha256").update(contextSnippet).digest("hex").slice(0, 16)
+}
+
+/**
+ * Extract only the last user message from the conversation.
+ *
+ * When resuming a Claude Agent SDK session, the SDK already has the full
+ * conversation history. OpenCode re-sends everything (user1, assistant1,
+ * user2, ...) but we only need the genuinely new user turn.
+ *
+ * Slicing by message count is unreliable because opencode inserts synthetic
+ * user messages (reminders, system tags) that inflate the count. Instead,
+ * find the last "user" role message — that is the new turn.
+ */
+function getLastUserMessage(
+  messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>
+): Array<{ role: string; content: string | Array<{ type: string; text?: string }> }> {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg && msg.role === "user") {
+      return [msg]
+    }
+  }
+  return messages.slice(-1)
+}
 
 const BLOCKED_BUILTIN_TOOLS = [
   "Read", "Write", "Edit", "MultiEdit",
@@ -75,12 +253,29 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
       const model = mapModelToClaudeModel(body.model || "sonnet")
       const stream = body.stream ?? true
 
-      claudeLog("proxy.anthropic.request", { model, stream, messageCount: body.messages?.length })
+      // Extract and strip x-opencode-* headers (they should not reach Claude Agent SDK)
+      const opencodeSessionId = c.req.header("x-opencode-session")
+      const opencodeRequestId = c.req.header("x-opencode-request")
 
-      // Extract session ID from request headers for conversation resumption
-      const resumeSessionId = c.req.header('X-Claude-Session-ID')
+      claudeLog("proxy.anthropic.request", {
+        model,
+        stream,
+        messageCount: body.messages?.length,
+        opencodeSession: opencodeSessionId,
+        opencodeRequest: opencodeRequestId
+      })
+
+      // Session tracking: use x-opencode-session (primary) or fingerprint (fallback)
+      const sessionLookup = lookupSession(opencodeSessionId, body)
+      const resumeSessionId = sessionLookup?.state.claudeSessionId
+
       if (resumeSessionId) {
-        claudeLog("proxy.session.resume_requested", { sessionId: resumeSessionId })
+        claudeLog("proxy.session.resume_requested", {
+          claudeSessionId: resumeSessionId,
+          source: sessionLookup!.source,
+          opencodeSession: opencodeSessionId,
+          currentMessageCount: body.messages?.length
+        })
       }
 
       // Capture stderr for debugging
@@ -98,7 +293,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         }
       }
 
-      const prompt = body.messages
+      // When resuming a session, only send the last user message.
+      // The Claude Agent SDK already has the full conversation history via `resume`.
+      // OpenCode re-sends everything, but we only need the new user turn.
+      const messagesToSend = resumeSessionId
+        ? getLastUserMessage(body.messages)
+        : body.messages
+
+      if (resumeSessionId) {
+        claudeLog("proxy.session.sending_last_user_message", {
+          totalMessages: body.messages?.length,
+          sendingNew: messagesToSend?.length
+        })
+      }
+
+      const prompt = messagesToSend
         ?.map((m: { role: string; content: string | Array<{ type: string; text?: string }> }) => {
           const role = m.role === "assistant" ? "Assistant" : "Human"
           let content: string
@@ -176,6 +385,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           }
 
           clearTimeout(timeout)
+
+          // Store session for future requests
+          if (currentSessionId) {
+            storeSession(opencodeSessionId, body, currentSessionId, opencodeRequestId)
+          }
 
           return c.json({
             id: `msg_${Date.now()}`,
@@ -442,8 +656,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               turns: turnCount,
               hasResult,
               hasStreamEvents,
-              exitedNormally: true
+              exitedNormally: true,
+              sessionId: currentSessionId
             })
+
+            // Store session for future requests
+            if (currentSessionId) {
+              storeSession(opencodeSessionId, body, currentSessionId, opencodeRequestId)
+            }
 
             // Clear timeouts on successful completion
             if (timeoutId) clearTimeout(timeoutId)
