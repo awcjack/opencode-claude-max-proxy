@@ -1,6 +1,6 @@
 {
   "name": "opencode-claude-max-proxy",
-  "version": "1.1.0",
+  "version": "1.8.0",
   "description": "Use your Claude Max subscription with OpenCode via proxy server",
   "type": "module",
   "main": "./src/proxy/server.ts",
@@ -11,13 +11,14 @@
     ".": "./src/proxy/server.ts"
   },
   "scripts": {
-    "start": "bun run ./bin/claude-proxy.ts",
-    "proxy": "bun run ./bin/claude-proxy.ts",
+    "start": "./bin/claude-proxy-supervisor.sh",
+    "proxy": "./bin/claude-proxy-supervisor.sh",
+    "proxy:direct": "bun run ./bin/claude-proxy.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.25",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.80",
     "glob": "^13.0.0",
     "hono": "^4.11.4"
   },
