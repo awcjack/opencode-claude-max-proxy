@@ -1,5 +1,6 @@
 export type PermissionMode =
   | "default"           // Standard permission behavior - prompts for confirmation
+  | "plan"              // Plan mode - read-only, no edits allowed
   | "acceptEdits"       // Auto-accept file edits
   | "bypassPermissions" // Bypass all permission checks (use with caution)
 
