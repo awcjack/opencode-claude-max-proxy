@@ -10,7 +10,10 @@ import { existsSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
 import { opencodeMcpServer } from "../mcpTools"
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
+import { fuzzyMatchAgentName } from "./agentMatch"
+import { buildAgentDefinitions } from "./agentDefs"
+import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASSTHROUGH_MCP_PREFIX } from "./passthroughTools"
 
 // Session tracking for conversation continuity
 // Maps opencode session ID -> Claude Agent SDK session state
@@ -25,8 +28,8 @@ const sessionCache = new Map<string, SessionState>()
 // Fallback: fingerprint-based session tracking for requests without x-opencode-session header
 const fingerprintCache = new Map<string, SessionState>()
 
-// Clean up stale sessions every 30 minutes
-const SESSION_TTL_MS = 60 * 60 * 1000 // 1 hour
+// Clean up stale sessions every 60 minutes (24 hour TTL like upstream)
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 setInterval(() => {
   const now = Date.now()
   for (const [key, value] of sessionCache.entries()) {
@@ -41,7 +44,7 @@ setInterval(() => {
       fingerprintCache.delete(key)
     }
   }
-}, 30 * 60 * 1000)
+}, 60 * 60 * 1000)
 
 /**
  * Look up session state by opencode session ID (primary) or fingerprint (fallback).
@@ -189,10 +192,114 @@ function getLastUserMessage(
   return messages.slice(-1)
 }
 
+/** Clear all session caches (used in tests) */
+export function clearSessionCache() {
+  sessionCache.clear()
+  fingerprintCache.clear()
+}
+
+// --- Error Classification ---
+function classifyError(errMsg: string): { status: number; type: string; message: string } {
+  const lower = errMsg.toLowerCase()
+
+  if (lower.includes("401") || lower.includes("authentication") || lower.includes("invalid auth") || lower.includes("credentials")) {
+    return {
+      status: 401,
+      type: "authentication_error",
+      message: "Claude authentication expired or invalid. Run 'claude login' in your terminal to re-authenticate, then restart the proxy."
+    }
+  }
+
+  if (lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")) {
+    return {
+      status: 429,
+      type: "rate_limit_error",
+      message: "Claude Max rate limit reached. Wait a moment and try again."
+    }
+  }
+
+  if (lower.includes("402") || lower.includes("billing") || lower.includes("subscription") || lower.includes("payment")) {
+    return {
+      status: 402,
+      type: "billing_error",
+      message: "Claude Max subscription issue. Check your subscription status at https://claude.ai/settings/subscription"
+    }
+  }
+
+  if (lower.includes("exited with code") || lower.includes("process exited")) {
+    const codeMatch = errMsg.match(/exited with code (\d+)/)
+    const code = codeMatch ? codeMatch[1] : "unknown"
+
+    if (code === "1" && !lower.includes("tool") && !lower.includes("mcp")) {
+      return {
+        status: 401,
+        type: "authentication_error",
+        message: "Claude Code process crashed (exit code 1). This usually means authentication expired. Run 'claude login' in your terminal to re-authenticate, then restart the proxy."
+      }
+    }
+
+    return {
+      status: 502,
+      type: "api_error",
+      message: `Claude Code process exited unexpectedly (code ${code}). Check proxy logs for details. If this persists, try 'claude login' to refresh authentication.`
+    }
+  }
+
+  if (lower.includes("timeout") || lower.includes("timed out")) {
+    return {
+      status: 504,
+      type: "timeout_error",
+      message: "Request timed out. The operation may have been too complex. Try a simpler request."
+    }
+  }
+
+  if (lower.includes("500") || lower.includes("server error") || lower.includes("internal error")) {
+    return {
+      status: 502,
+      type: "api_error",
+      message: "Claude API returned a server error. This is usually temporary — try again in a moment."
+    }
+  }
+
+  if (lower.includes("503") || lower.includes("overloaded")) {
+    return {
+      status: 503,
+      type: "overloaded_error",
+      message: "Claude is temporarily overloaded. Try again in a few seconds."
+    }
+  }
+
+  return {
+    status: 500,
+    type: "api_error",
+    message: errMsg || "Unknown error"
+  }
+}
+
 const BLOCKED_BUILTIN_TOOLS = [
   "Read", "Write", "Edit", "MultiEdit",
   "Bash", "Glob", "Grep", "NotebookEdit",
   "WebFetch", "WebSearch", "TodoWrite"
+]
+
+// Claude Code SDK tools that have NO equivalent in OpenCode.
+const CLAUDE_CODE_ONLY_TOOLS = [
+  "ToolSearch",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "EnterPlanMode",
+  "ExitPlanMode",
+  "EnterWorktree",
+  "ExitWorktree",
+  "NotebookEdit",
+  "TodoWrite",
+  "AskUserQuestion",
+  "Skill",
+  "Agent",
+  "TaskOutput",
+  "TaskStop",
+  "WebSearch",
 ]
 
 const MCP_SERVER_NAME = "opencode"
@@ -305,11 +412,35 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
     return c.json({
       status: "ok",
       service: "claude-max-proxy",
-      version: "1.0.0",
+      version: "1.8.0",
       format: "anthropic",
-      endpoints: ["/v1/messages", "/messages"]
+      endpoints: ["/v1/messages", "/messages", "/health"]
     })
   })
+
+  // --- Concurrency Control ---
+  const MAX_CONCURRENT_SESSIONS = parseInt(process.env.CLAUDE_PROXY_MAX_CONCURRENT || "10", 10)
+  let activeSessions = 0
+  const sessionQueue: Array<{ resolve: () => void }> = []
+
+  async function acquireSession(): Promise<void> {
+    if (activeSessions < MAX_CONCURRENT_SESSIONS) {
+      activeSessions++
+      return
+    }
+    return new Promise<void>((resolve) => {
+      sessionQueue.push({ resolve })
+    })
+  }
+
+  function releaseSession(): void {
+    activeSessions--
+    const next = sessionQueue.shift()
+    if (next) {
+      activeSessions++
+      next.resolve()
+    }
+  }
 
   const handleMessages = async (c: Context) => {
     try {
@@ -950,6 +1081,36 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
   app.post("/v1/messages", handleMessages)
   app.post("/messages", handleMessages)
+
+  // Health check endpoint — verifies auth status
+  app.get("/health", (c) => {
+    try {
+      const authJson = execSync("claude auth status", { encoding: "utf-8", timeout: 5000 })
+      const auth = JSON.parse(authJson)
+      if (!auth.loggedIn) {
+        return c.json({
+          status: "unhealthy",
+          error: "Not logged in. Run: claude login",
+          auth: { loggedIn: false }
+        }, 503)
+      }
+      return c.json({
+        status: "healthy",
+        auth: {
+          loggedIn: true,
+          email: auth.email,
+          subscriptionType: auth.subscriptionType,
+        },
+        mode: process.env.CLAUDE_PROXY_PASSTHROUGH ? "passthrough" : "internal",
+      })
+    } catch {
+      return c.json({
+        status: "degraded",
+        error: "Could not verify auth status",
+        mode: process.env.CLAUDE_PROXY_PASSTHROUGH ? "passthrough" : "internal",
+      })
+    }
+  })
 
   return { app, config: finalConfig }
 }
