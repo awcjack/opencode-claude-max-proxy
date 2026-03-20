@@ -10,6 +10,7 @@ export interface ProxyConfig {
   debug: boolean
   permissionMode: PermissionMode
   workingDirectory?: string
+  idleTimeoutSeconds: number
 }
 
 export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
@@ -17,5 +18,6 @@ export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   host: "127.0.0.1",
   debug: process.env.CLAUDE_PROXY_DEBUG === "1",
   permissionMode: (process.env.CLAUDE_PROXY_PERMISSION_MODE as PermissionMode) || "bypassPermissions",
-  workingDirectory: process.env.CLAUDE_PROXY_CWD || process.cwd()
+  workingDirectory: process.env.CLAUDE_PROXY_CWD || process.cwd(),
+  idleTimeoutSeconds: parseInt(process.env.CLAUDE_PROXY_IDLE_TIMEOUT_SECONDS || "120", 10)
 }
