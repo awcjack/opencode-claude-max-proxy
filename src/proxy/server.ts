@@ -1085,7 +1085,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
   // Health check endpoint — verifies auth status
   app.get("/health", (c) => {
     try {
-      const authJson = execSync("claude auth status", { encoding: "utf-8", timeout: 5000 })
+      const authJson = execSync("claude auth status", { encoding: "utf-8", timeout: 5000, env: { ...process.env } })
       const auth = JSON.parse(authJson)
       if (!auth.loggedIn) {
         return c.json({
