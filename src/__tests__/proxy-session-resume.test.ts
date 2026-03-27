@@ -56,7 +56,7 @@ mock.module("../mcpTools", () => ({
   opencodeMcpServer: { type: "sdk", name: "opencode", instance: {} },
 }))
 
-const { createProxyServer, clearSessionCache } = await import("../proxy/server")
+const { createProxyServer, clearAllSessionCaches } = await import("../proxy/server")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -96,7 +96,7 @@ describe("Session resume: session ID tracking", () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hello" }]),
     ]
-    clearSessionCache()
+    clearAllSessionCaches()
     capturedQueryParams = null
     queryCallCount = 0
   })
@@ -209,7 +209,7 @@ describe("Session resume: fingerprint fallback", () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hello" }]),
     ]
-    clearSessionCache()
+    clearAllSessionCaches()
     capturedQueryParams = null
     queryCallCount = 0
   })
@@ -280,7 +280,7 @@ describe("Session resume: only send last user message on resume", () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hello" }]),
     ]
-    clearSessionCache()
+    clearAllSessionCaches()
     capturedQueryParams = null
     queryCallCount = 0
   })

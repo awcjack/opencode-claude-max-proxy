@@ -33,7 +33,7 @@ mock.module("../mcpTools", () => ({
   opencodeMcpServer: { type: "sdk", name: "opencode", instance: {} },
 }))
 
-const { createProxyServer, clearSessionCache } = await import("../proxy/server")
+const { createProxyServer, clearAllSessionCaches } = await import("../proxy/server")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -53,7 +53,7 @@ describe("Working directory", () => {
   beforeEach(() => {
     mockMessages = [assistantMessage([{ type: "text", text: "Hi" }])]
     capturedQueryParams = null
-    clearSessionCache()
+    clearAllSessionCaches()
   })
 
   it("should pass cwd option to the SDK query", async () => {

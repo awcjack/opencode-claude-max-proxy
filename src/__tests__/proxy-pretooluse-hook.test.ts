@@ -36,7 +36,7 @@ mock.module("../mcpTools", () => ({
   opencodeMcpServer: { type: "sdk", name: "opencode", instance: {} },
 }))
 
-const { createProxyServer, clearSessionCache } = await import("../proxy/server")
+const { createProxyServer, clearAllSessionCaches } = await import("../proxy/server")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -78,7 +78,7 @@ describe("PreToolUse hook: agent name correction", () => {
   beforeEach(() => {
     mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
     capturedQueryParams = null
-    clearSessionCache()
+    clearAllSessionCaches()
   })
 
   it("should include PreToolUse hooks in SDK options", async () => {
@@ -196,7 +196,7 @@ describe("SDK agents option", () => {
   beforeEach(() => {
     mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
     capturedQueryParams = null
-    clearSessionCache()
+    clearAllSessionCaches()
   })
 
   it("should pass agents extracted from Task tool to SDK", async () => {
@@ -264,7 +264,7 @@ describe("PreToolUse hook: cleanup of old hacks", () => {
   beforeEach(() => {
     mockMessages = [assistantMessage([{ type: "text", text: "Done" }])]
     capturedQueryParams = null
-    clearSessionCache()
+    clearAllSessionCaches()
   })
 
   it("should NOT include canUseTool deny for Task", async () => {

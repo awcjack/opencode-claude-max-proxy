@@ -213,7 +213,7 @@ function getLastUserMessage(
 }
 
 /** Clear all session caches (used in tests) */
-export function clearSessionCache() {
+export function clearAllSessionCaches() {
   sessionCache.clear()
   fingerprintCache.clear()
 }
@@ -486,11 +486,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         effectivePermissionMode
       })
 
-      // Session resume is DISABLED - Claude SDK spawns a new process for each query,
-      // so SDK sessions don't persist between requests. The "resume" option only works
-      // within a single long-running SDK process, not across separate invocations.
-      // Each request must send the full conversation history.
-      const resumeSessionId: string | undefined = undefined
+      // Session tracking: use x-opencode-session (primary) or fingerprint (fallback)
+      const sessionLookup = lookupSession(opencodeSessionId, body)
+      let resumeSessionId = sessionLookup?.state.claudeSessionId
+
+      if (resumeSessionId) {
+        claudeLog("proxy.session.resume_requested", {
+          claudeSessionId: resumeSessionId,
+          source: sessionLookup!.source,
+          opencodeSession: opencodeSessionId,
+          currentMessageCount: body.messages?.length
+        })
+      }
 
       // Capture stderr for debugging
       const stderrMessages: string[] = []
@@ -507,21 +514,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         }
       }
 
-      // When resuming a session, only send the last user message.
-      // The Claude Agent SDK already has the full conversation history via `resume`.
-      // OpenCode re-sends everything, but we only need the new user turn.
-      const messagesToSend = resumeSessionId
-        ? getLastUserMessage(body.messages)
-        : body.messages
-
-      if (resumeSessionId) {
-        claudeLog("proxy.session.sending_last_user_message", {
-          totalMessages: body.messages?.length,
-          sendingNew: messagesToSend?.length
-        })
-      }
-
-      const prompt = messagesToSend
+      // Helper to format messages as prompt
+      const formatPrompt = (messages: typeof body.messages) => messages
         ?.map((m: { role: string; content: string | Array<{ type: string; text?: string }> }) => {
           const role = m.role === "assistant" ? "Assistant" : "Human"
           let content: string
@@ -538,6 +532,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
           return `${role}: ${content}`
         })
         .join("\n\n") || ""
+
+      // When resuming a session, only send the last user message.
+      // The Claude Agent SDK already has the full conversation history via `resume`.
+      // OpenCode re-sends everything, but we only need the new user turn.
+      const messagesToSend = resumeSessionId
+        ? getLastUserMessage(body.messages)
+        : body.messages
+
+      if (resumeSessionId) {
+        claudeLog("proxy.session.sending_last_user_message", {
+          totalMessages: body.messages?.length,
+          sendingNew: messagesToSend?.length
+        })
+      }
+
+      const prompt = formatPrompt(messagesToSend)
+      const fullPrompt = formatPrompt(body.messages)  // For retry without resume
 
       if (!stream) {
         let fullContent = ""
@@ -818,7 +829,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                     session_id: currentSessionId
                   })
 
-                  // Check for session resume failure - clear cache and let caller retry
+                  // Check for session resume failure - clear cache, we'll handle retry below
                   if (message.is_error && resumeSessionId) {
                     // Check both "result" field and "errors" array for the error message
                     const resultText = (message as any).result || ""
@@ -829,6 +840,77 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                     if (allErrorText.includes("No conversation found")) {
                       claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: allErrorText.trim() })
                       clearSessionCache(resumeSessionId)
+                      // Clear resumeSessionId so next iteration doesn't try to resume
+                      resumeSessionId = undefined
+
+                      // Start a new query without resume
+                      claudeLog("proxy.session.retry_without_resume", { opencodeSession: opencodeSessionId })
+                      const retryResponse = query({
+                        prompt: fullPrompt,  // Send full conversation, not just last message
+                        options: {
+                          model,
+                          includePartialMessages: true,
+                          abortController,
+                          stderr: stderrHandler,
+                          permissionMode: effectivePermissionMode,
+                          cwd: finalConfig.workingDirectory,
+                          env: buildEnvWithMcpTools(),
+                          systemPrompt: {
+                            type: "preset",
+                            preset: "claude_code",
+                            append: MCP_CLI_SYSTEM_PROMPT,
+                          },
+                          mcpServers: {
+                            "computer-control-mcp": {
+                              command: "uvx",
+                              args: ["computer-control-mcp", "server"]
+                            }
+                          }
+                          // NO resume option
+                        }
+                      })
+
+                      // Process retry response
+                      for await (const retryMsg of retryResponse) {
+                        if (clientDisconnected) break
+                        resetInactivityTimeout()
+
+                        if (retryMsg.type === "system" && (retryMsg as any).subtype === "init") {
+                          if ((retryMsg as any).session_id) {
+                            currentSessionId = (retryMsg as any).session_id
+                            claudeLog("proxy.session.new_after_retry", { sessionId: currentSessionId })
+                          }
+                        }
+
+                        if (retryMsg.type === "result") {
+                          hasResult = true
+                          if ((retryMsg as any).session_id) {
+                            currentSessionId = (retryMsg as any).session_id
+                          }
+                        }
+
+                        if (retryMsg.type === "stream_event") {
+                          const event = (retryMsg as any).event
+                          if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
+                            controller.enqueue(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
+                              type: "content_block_delta",
+                              index: event.index,
+                              delta: event.delta
+                            })}\n\n`))
+                          }
+                        } else if (retryMsg.type === "assistant" && !hasStreamEvents) {
+                          const textBlocks = retryMsg.message.content.filter((b: any) => b.type === "text")
+                          for (const block of textBlocks) {
+                            controller.enqueue(encoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
+                              type: "content_block_delta",
+                              index: 0,
+                              delta: { type: "text_delta", text: (block as any).text }
+                            })}\n\n`))
+                          }
+                        }
+                      }
+                      // Exit the original loop since we handled retry
+                      break
                     }
                   }
                 }

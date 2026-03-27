@@ -45,7 +45,7 @@ mock.module("../mcpTools", () => ({
   opencodeMcpServer: { type: "sdk", name: "opencode", instance: {} },
 }))
 
-const { createProxyServer, clearSessionCache } = await import("../proxy/server")
+const { createProxyServer, clearAllSessionCaches } = await import("../proxy/server")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -78,7 +78,7 @@ async function postStream(app: any, content: string) {
 describe("Streaming: single message per response", () => {
   beforeEach(() => {
     mockMessages = []
-    clearSessionCache()
+    clearAllSessionCaches()
   })
 
   it("should emit exactly one message_start for multi-turn SDK responses", async () => {
