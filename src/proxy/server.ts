@@ -603,9 +603,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               }
               // Check for session resume failure - clear cache and let caller retry
               if ((message as any).is_error && resumeSessionId) {
+                // Check both "result" field and "errors" array for the error message
                 const resultText = (message as any).result || ""
-                if (resultText.includes("No conversation found")) {
-                  claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: resultText })
+                const errorsArray = (message as any).errors || []
+                const errorsText = errorsArray.map((e: any) => typeof e === "string" ? e : JSON.stringify(e)).join(" ")
+                const allErrorText = resultText + " " + errorsText
+
+                if (allErrorText.includes("No conversation found")) {
+                  claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: allErrorText.trim() })
                   clearSessionCache(resumeSessionId)
                 }
               }
@@ -822,9 +827,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
                   // Check for session resume failure - clear cache and let caller retry
                   if (message.is_error && resumeSessionId) {
+                    // Check both "result" field and "errors" array for the error message
                     const resultText = (message as any).result || ""
-                    if (resultText.includes("No conversation found")) {
-                      claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: resultText })
+                    const errorsArray = (message as any).errors || []
+                    const errorsText = errorsArray.map((e: any) => typeof e === "string" ? e : JSON.stringify(e)).join(" ")
+                    const allErrorText = resultText + " " + errorsText
+
+                    if (allErrorText.includes("No conversation found")) {
+                      claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: allErrorText.trim() })
                       clearSessionCache(resumeSessionId)
                     }
                   }
