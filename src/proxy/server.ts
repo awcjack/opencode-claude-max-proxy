@@ -871,9 +871,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                       })
 
                       // Process retry response
+                      claudeLog("proxy.session.retry_stream_started", { opencodeSession: opencodeSessionId })
                       for await (const retryMsg of retryResponse) {
-                        if (clientDisconnected) break
+                        if (clientDisconnected) {
+                          claudeLog("proxy.session.retry_client_disconnected", {})
+                          break
+                        }
                         resetInactivityTimeout()
+
+                        claudeLog("proxy.session.retry_message", { type: retryMsg.type, keys: Object.keys(retryMsg) })
 
                         if (retryMsg.type === "system" && (retryMsg as any).subtype === "init") {
                           if ((retryMsg as any).session_id) {
@@ -887,6 +893,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                           if ((retryMsg as any).session_id) {
                             currentSessionId = (retryMsg as any).session_id
                           }
+                          claudeLog("proxy.session.retry_result", {
+                            subtype: (retryMsg as any).subtype,
+                            is_error: (retryMsg as any).is_error,
+                            session_id: currentSessionId
+                          })
                         }
 
                         if (retryMsg.type === "stream_event") {
@@ -910,6 +921,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                         }
                       }
                       // Exit the original loop since we handled retry
+                      claudeLog("proxy.session.retry_loop_complete", { sessionId: currentSessionId, hasResult })
                       break
                     }
                   }
