@@ -44,6 +44,7 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
     name: "test",
     instance: {},
   }),
+  getSessionInfo: async () => undefined,
 }))
 
 mock.module("../logger", () => ({

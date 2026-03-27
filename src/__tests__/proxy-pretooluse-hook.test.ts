@@ -25,6 +25,7 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
     })()
   },
   createSdkMcpServer: () => ({ type: "sdk", name: "test", instance: {} }),
+  getSessionInfo: async () => undefined,
 }))
 
 mock.module("../logger", () => ({
