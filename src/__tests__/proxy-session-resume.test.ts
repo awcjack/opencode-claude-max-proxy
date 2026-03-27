@@ -38,6 +38,15 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
         // Inject session_id into messages (like the real SDK does)
         yield { ...msg, session_id: MOCK_SDK_SESSION }
       }
+      // Yield a result message with the session_id (this is how the real SDK provides session_id)
+      yield {
+        type: "result",
+        subtype: "success",
+        session_id: MOCK_SDK_SESSION,
+        num_turns: 1,
+        duration_ms: 100,
+        is_error: false,
+      }
     })()
   },
   createSdkMcpServer: () => ({
@@ -45,6 +54,13 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
     name: "test",
     instance: {},
   }),
+  // Mock getSessionInfo to always return valid session info for the mock session
+  getSessionInfo: async (sessionId: string) => {
+    if (sessionId === MOCK_SDK_SESSION) {
+      return { sessionId: MOCK_SDK_SESSION, summary: "Mock session", lastModified: Date.now() }
+    }
+    return undefined
+  },
 }))
 
 mock.module("../logger", () => ({
