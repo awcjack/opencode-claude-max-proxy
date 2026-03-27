@@ -140,6 +140,26 @@ function storeSession(
 }
 
 /**
+ * Clear session cache for a specific Claude session ID (called when resume fails).
+ */
+function clearSessionCache(claudeSessionId: string): void {
+  // Clear from sessionCache
+  for (const [key, value] of sessionCache.entries()) {
+    if (value.claudeSessionId === claudeSessionId) {
+      sessionCache.delete(key)
+      claudeLog("proxy.session.cleared", { source: "header", opencodeSession: key, claudeSessionId })
+    }
+  }
+  // Clear from fingerprintCache
+  for (const [key, value] of fingerprintCache.entries()) {
+    if (value.claudeSessionId === claudeSessionId) {
+      fingerprintCache.delete(key)
+      claudeLog("proxy.session.cleared", { source: "fingerprint", fingerprint: key, claudeSessionId })
+    }
+  }
+}
+
+/**
  * Generate a fingerprint for a conversation (fallback when no x-opencode-session header).
  */
 function getConversationFingerprint(body: {
@@ -466,10 +486,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         effectivePermissionMode
       })
 
-      // Session resume is disabled - Claude SDK sessions don't persist across requests
-      // when the SDK process exits between calls. Each request starts fresh.
-      // TODO: Re-enable when using persistent Claude SDK process
-      const resumeSessionId: string | undefined = undefined
+      // Session tracking: use x-opencode-session (primary) or fingerprint (fallback)
+      const sessionLookup = lookupSession(opencodeSessionId, body)
+      let resumeSessionId = sessionLookup?.state.claudeSessionId
+
+      if (resumeSessionId) {
+        claudeLog("proxy.session.resume_requested", {
+          claudeSessionId: resumeSessionId,
+          source: sessionLookup!.source,
+          opencodeSession: opencodeSessionId,
+          currentMessageCount: body.messages?.length
+        })
+      }
 
       // Capture stderr for debugging
       const stderrMessages: string[] = []
@@ -572,6 +600,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
             if (message.type === "result") {
               if ((message as any).session_id) {
                 currentSessionId = (message as any).session_id
+              }
+              // Check for session resume failure - clear cache and let caller retry
+              if ((message as any).is_error && resumeSessionId) {
+                const resultText = (message as any).result || ""
+                if (resultText.includes("No conversation found")) {
+                  claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: resultText })
+                  clearSessionCache(resumeSessionId)
+                }
               }
             }
             if (message.type === "assistant") {
@@ -783,6 +819,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                     is_error: message.is_error,
                     session_id: currentSessionId
                   })
+
+                  // Check for session resume failure - clear cache and let caller retry
+                  if (message.is_error && resumeSessionId) {
+                    const resultText = (message as any).result || ""
+                    if (resultText.includes("No conversation found")) {
+                      claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: resultText })
+                      clearSessionCache(resumeSessionId)
+                    }
+                  }
                 }
 
                 // Handle partial streaming events for real-time updates
