@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "gui",
+    "task-master-ai"
+  ]
+}
