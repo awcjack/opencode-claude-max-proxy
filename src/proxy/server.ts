@@ -486,18 +486,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         effectivePermissionMode
       })
 
-      // Session tracking: use x-opencode-session (primary) or fingerprint (fallback)
-      const sessionLookup = lookupSession(opencodeSessionId, body)
-      let resumeSessionId = sessionLookup?.state.claudeSessionId
-
-      if (resumeSessionId) {
-        claudeLog("proxy.session.resume_requested", {
-          claudeSessionId: resumeSessionId,
-          source: sessionLookup!.source,
-          opencodeSession: opencodeSessionId,
-          currentMessageCount: body.messages?.length
-        })
-      }
+      // Session resume is DISABLED - Claude SDK spawns a new process for each query,
+      // so SDK sessions don't persist between requests. The "resume" option only works
+      // within a single long-running SDK process, not across separate invocations.
+      // Each request must send the full conversation history.
+      const resumeSessionId: string | undefined = undefined
 
       // Capture stderr for debugging
       const stderrMessages: string[] = []
