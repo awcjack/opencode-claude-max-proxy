@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
-import { query } from "@anthropic-ai/claude-agent-sdk"
+import { query, getSessionInfo } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
 import type { ProxyConfig, PermissionMode } from "./types"
 import { DEFAULT_PROXY_CONFIG } from "./types"
@@ -71,10 +71,13 @@ function lookupSession(
       })
       return { state: cached, source: "header" }
     }
+    // When header is provided but not found, do NOT fall back to fingerprint.
+    // This ensures different opencode sessions stay isolated.
     claudeLog("proxy.session.lookup_miss", { source: "header", opencodeSession: opencodeSessionId })
+    return undefined
   }
 
-  // Fallback: fingerprint-based matching
+  // Fallback: fingerprint-based matching (only when NO header is provided)
   const fingerprint = getConversationFingerprint(body)
   if (fingerprint) {
     const cached = fingerprintCache.get(fingerprint)
@@ -216,6 +219,32 @@ function getLastUserMessage(
 export function clearAllSessionCaches() {
   sessionCache.clear()
   fingerprintCache.clear()
+}
+
+/**
+ * Validate that a session exists in the Claude Agent SDK before attempting to resume.
+ * This prevents the "No conversation found" error by checking upfront.
+ *
+ * @param sessionId - The Claude session ID to validate
+ * @param cwd - Working directory to search for the session
+ * @returns true if session exists and can be resumed, false otherwise
+ */
+async function validateSessionExists(sessionId: string, cwd?: string): Promise<boolean> {
+  try {
+    const sessionInfo = await getSessionInfo(sessionId, cwd ? { dir: cwd } : undefined)
+    if (sessionInfo) {
+      claudeLog("proxy.session.validated", { sessionId, exists: true, summary: sessionInfo.summary })
+      return true
+    }
+    claudeLog("proxy.session.validated", { sessionId, exists: false })
+    return false
+  } catch (error) {
+    claudeLog("proxy.session.validation_error", {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return false
+  }
 }
 
 // --- Error Classification ---
@@ -490,13 +519,26 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
       const sessionLookup = lookupSession(opencodeSessionId, body)
       let resumeSessionId = sessionLookup?.state.claudeSessionId
 
+      // Validate session exists in SDK before attempting resume (Option 2: use getSessionInfo)
       if (resumeSessionId) {
-        claudeLog("proxy.session.resume_requested", {
-          claudeSessionId: resumeSessionId,
-          source: sessionLookup!.source,
-          opencodeSession: opencodeSessionId,
-          currentMessageCount: body.messages?.length
-        })
+        const sessionExists = await validateSessionExists(resumeSessionId, finalConfig.workingDirectory)
+        if (sessionExists) {
+          claudeLog("proxy.session.resume_requested", {
+            claudeSessionId: resumeSessionId,
+            source: sessionLookup!.source,
+            opencodeSession: opencodeSessionId,
+            currentMessageCount: body.messages?.length
+          })
+        } else {
+          // Session doesn't exist in SDK - clear cache and don't attempt resume
+          claudeLog("proxy.session.resume_skipped", {
+            reason: "session_not_found_in_sdk",
+            claudeSessionId: resumeSessionId,
+            opencodeSession: opencodeSessionId
+          })
+          clearSessionCache(resumeSessionId)
+          resumeSessionId = undefined
+        }
       }
 
       // Capture stderr for debugging
