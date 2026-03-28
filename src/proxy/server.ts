@@ -647,15 +647,26 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               if ((message as any).session_id) {
                 currentSessionId = (message as any).session_id
               }
-              // Check for session resume failure - clear cache and let caller retry
-              if ((message as any).is_error && resumeSessionId) {
+              // Check for errors that indicate session/auth issues
+              if ((message as any).is_error) {
                 // Check both "result" field and "errors" array for the error message
                 const resultText = (message as any).result || ""
                 const errorsArray = (message as any).errors || []
                 const errorsText = errorsArray.map((e: any) => typeof e === "string" ? e : JSON.stringify(e)).join(" ")
                 const allErrorText = resultText + " " + errorsText
 
-                if (allErrorText.includes("No conversation found")) {
+                // Handle session invalidation errors - includes auth errors after re-login
+                const isAuthError = allErrorText.includes("Not logged in") ||
+                                    allErrorText.includes("authentication_error") ||
+                                    allErrorText.includes("Failed to authenticate") ||
+                                    allErrorText.includes("Invalid authentication credentials")
+                const isSessionNotFound = allErrorText.includes("No conversation found")
+
+                if (isAuthError) {
+                  // Auth errors mean ALL cached sessions are invalid (user re-logged in or credentials expired)
+                  claudeLog("proxy.session.auth_error_clear_all", { reason: "authentication failed", error: allErrorText.trim() })
+                  clearAllSessionCaches()
+                } else if (isSessionNotFound && resumeSessionId) {
                   claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: allErrorText.trim() })
                   clearSessionCache(resumeSessionId)
                 }
@@ -871,17 +882,35 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                     session_id: currentSessionId
                   })
 
-                  // Check for session resume failure - clear cache, we'll handle retry below
-                  if (message.is_error && resumeSessionId) {
+                  // Check for session/auth errors - clear cache and handle retry below
+                  if (message.is_error) {
                     // Check both "result" field and "errors" array for the error message
                     const resultText = (message as any).result || ""
                     const errorsArray = (message as any).errors || []
                     const errorsText = errorsArray.map((e: any) => typeof e === "string" ? e : JSON.stringify(e)).join(" ")
                     const allErrorText = resultText + " " + errorsText
 
-                    if (allErrorText.includes("No conversation found")) {
-                      claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: allErrorText.trim() })
-                      clearSessionCache(resumeSessionId)
+                    // Handle session invalidation errors - includes auth errors after re-login
+                    const isAuthError = allErrorText.includes("Not logged in") ||
+                                        allErrorText.includes("authentication_error") ||
+                                        allErrorText.includes("Failed to authenticate") ||
+                                        allErrorText.includes("Invalid authentication credentials")
+                    const isSessionNotFound = allErrorText.includes("No conversation found")
+
+                    // Always clear sessions on auth errors (credentials changed/expired)
+                    if (isAuthError) {
+                      claudeLog("proxy.session.auth_error_clear_all", { reason: "authentication failed", error: allErrorText.trim() })
+                      clearAllSessionCaches()
+                    }
+
+                    // Only retry if we were trying to resume a session
+                    if ((isSessionNotFound || isAuthError) && resumeSessionId) {
+                      claudeLog("proxy.session.resume_failed", { claudeSessionId: resumeSessionId, error: allErrorText.trim(), isAuthError })
+
+                      if (!isAuthError) {
+                        // Only need to clear specific session if not auth error (auth error already cleared all)
+                        clearSessionCache(resumeSessionId)
+                      }
                       // Clear resumeSessionId so next iteration doesn't try to resume
                       resumeSessionId = undefined
 
